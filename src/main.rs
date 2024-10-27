@@ -17,8 +17,6 @@ use num_cpus;
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error("Failed to get exif value: {0} {1}")]
-    ExifValueError(PathBuf, String),
     #[error("Failed to get exif time: {0} {1} {2}")]
     ExifTimeError(PathBuf, String, String),
     #[error("No creation date found: {0}")]
@@ -86,18 +84,19 @@ impl ImageInfo {
             match iter {
                 Ok(iter) => {
                     for exif in iter {
-                        let value = exif.get_value().ok_or_else(|| Error::ExifValueError(path.to_path_buf(), format!("{:?}", exif)))?;
-                        let tag = match exif.tag() {
-                            Some(tag) => tag,
-                            None => {
-                                // unknown tag
-                                continue;
-                            },
+                        let Some(tag) = exif.tag() else {
+                            // unknown tag, not error
+                            continue;
                         };
                         match tag {
                             ExifTag::DateTimeOriginal |
                                 ExifTag::CreateDate |
                                 ExifTag::ModifyDate => {
+
+                                let Some(value) = exif.get_value() else {
+                                    // just empty, not error
+                                    continue;
+                                };
                                 let date_time = value.as_time().ok_or_else(|| Error::ExifTimeError(path.to_path_buf(), tag.to_string(), value.to_string()))?;
                                 let date_time = date_time.naive_local();
                                 date_time_candidates.push(date_time);
