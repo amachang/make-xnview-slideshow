@@ -17,8 +17,6 @@ use num_cpus;
 
 #[derive(thiserror::Error, Debug)]
 enum Error {
-    #[error("Failed to parse exif: {0}")]
-    ExifParseError(PathBuf),
     #[error("Failed to get exif value: {0} {1}")]
     ExifValueError(PathBuf, String),
     #[error("Failed to get exif time: {0} {1} {2}")]
@@ -66,7 +64,7 @@ struct ImageInfo {
 
 impl ImageInfo {
     async fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        if let Some(image_info) = cached_image_info(path.as_ref()).await? {
+        if let Some(image_info) = cached_image_info(path.as_ref()).await {
             return Ok(image_info);
         }
 
@@ -84,25 +82,33 @@ impl ImageInfo {
         let mut media_parser = AsyncMediaParser::new();
         let ms = AsyncMediaSource::file_path(path).await?;
         if ms.has_exif() {
-            let iter: ExifIter = media_parser.parse(ms).await.map_err(|_| Error::ExifParseError(path.to_path_buf()))?;
-            for exif in iter {
-                let value = exif.get_value().ok_or_else(|| Error::ExifValueError(path.to_path_buf(), format!("{:?}", exif)))?;
-                let tag = match exif.tag() {
-                    Some(tag) => tag,
-                    None => {
-                        // unknown tag
-                        continue;
-                    },
-                };
-                match tag {
-                    ExifTag::DateTimeOriginal |
-                        ExifTag::CreateDate |
-                        ExifTag::ModifyDate => {
-                        let date_time = value.as_time().ok_or_else(|| Error::ExifTimeError(path.to_path_buf(), tag.to_string(), value.to_string()))?;
-                        let date_time = date_time.naive_local();
-                        date_time_candidates.push(date_time);
+            let iter: Result<ExifIter, _> = media_parser.parse(ms).await;
+            match iter {
+                Ok(iter) => {
+                    for exif in iter {
+                        let value = exif.get_value().ok_or_else(|| Error::ExifValueError(path.to_path_buf(), format!("{:?}", exif)))?;
+                        let tag = match exif.tag() {
+                            Some(tag) => tag,
+                            None => {
+                                // unknown tag
+                                continue;
+                            },
+                        };
+                        match tag {
+                            ExifTag::DateTimeOriginal |
+                                ExifTag::CreateDate |
+                                ExifTag::ModifyDate => {
+                                let date_time = value.as_time().ok_or_else(|| Error::ExifTimeError(path.to_path_buf(), tag.to_string(), value.to_string()))?;
+                                let date_time = date_time.naive_local();
+                                date_time_candidates.push(date_time);
+                            }
+                            _ => {}
+                        }
                     }
-                    _ => {}
+                },
+                Err(e) => {
+                    // ignore error
+                    eprintln!("Failed to parse exif, ignore exif info: {}: {:?}", path.display(), e);
                 }
             }
         }
@@ -141,14 +147,29 @@ async fn read_image_size(path: impl Into<PathBuf>) -> Result<(u32, u32)> {
     }).await?
 }
 
-async fn cached_image_info(path: impl AsRef<Path>) -> Result<Option<ImageInfo>> {
-    let cache_path = cache_path(path).await?;
+async fn cached_image_info(path: impl AsRef<Path>) -> Option<ImageInfo> {
+    let cache_path = match cache_path(path).await {
+        Ok(cache_path) => cache_path,
+        Err(_) => return None,
+    };
     if cache_path.exists() {
-        let json = tokio::fs::read_to_string(cache_path).await?;
-        let image_info: ImageInfo = serde_json::from_str(&json)?;
-        Ok(Some(image_info))
+        let json = match tokio::fs::read_to_string(cache_path).await {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("Failed to read cache file: {:?}", e);
+                return None;
+            }
+        };
+        let image_info: ImageInfo = match serde_json::from_str(&json) {
+            Ok(image_info) => image_info,
+            Err(e) => {
+                eprintln!("Failed to parse cache file: {:?}", e);
+                return None;
+            }
+        };
+        Some(image_info)
     } else {
-        Ok(None)
+        None
     }
 }
 
